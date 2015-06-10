@@ -1,0 +1,337 @@
+---
+title: "Time Series"
+output: html_document
+---
+## Данные
+Подключение библиотек:
+```{r,results='hide', message=FALSE}
+library(forecast)
+library(tseries)
+library(lmtest)
+```
+Загрузка данных:
+```{r}
+data <- read.csv("mean-monthly-air-temperature-deg.csv", sep=",", stringsAsFactors=F)
+names(data)[1] <- "Date"
+names(data)[2] <- "Value"
+xname <- "Mean monthly air temperature (Deg. F) Nottingham Castle"
+str(data)
+```
+В конце данных — лишние строки:
+```{r}
+tail(data, n=10)
+```
+Удалим их:
+```{r}
+nrows <- 1
+data  <- data[-((dim(data)[1]-nrows+1) : dim(data)[1]),]
+```
+Настроим тип столбцов и сформируем объект типа ts для прогнозирования:
+```{r}
+data$Value <- as.numeric(data$Value)
+data$Date <- as.Date(as.yearmon(data$Date, format="%Y-%m"))
+tSeries <- ts(data = data$Value, start = as.numeric(c(format(data$Date[1], "%Y"), format(data$Date[1], "%m"))), freq = 12)
+```
+Здесь параметр start - год и месяц первого периода в данных, а freq = 12 указывает, что данные будут помесячные.
+Полученный ряд:
+
+```{r}
+plot(tSeries, type="l", ylab=xname)
+grid()
+```
+
+Декомпозиция ряда:
+
+```{r}
+plot(stl(tSeries, s.window="periodic"))
+```
+
+Выделим часть ряда для оценки качества прогнозов:
+```{r}
+trainend <- 1938
+trainSeries <- window(tSeries,start=start(tSeries), end=trainend-.1)
+testSeries <- window(tSeries, start=trainend)
+D <- 24
+```
+D - горизонт прогнозирования, т.е. прогнозы мы будем строить на два года вперёд.
+
+Подберём преобразование Бокса-Кокса:
+```{r, fig.height=8}
+par(mfrow=c(2,1))
+plot(tSeries, ylab="Original series", xlab="")
+
+LambdaOpt <- BoxCox.lambda(tSeries)
+plot(BoxCox(tSeries, LambdaOpt), ylab="Transformed series", xlab="")
+title(main=toString(LambdaOpt), line=-1)
+```
+
+## Прогноз ARIMA
+### Прогноз ARIMA для исходного ряда ($\lambda=1$)
+Подберём и настроим модель на полных данных:
+```{r}
+fit <- auto.arima(tSeries)
+print(fit)
+```
+
+Настроив выбранную модель на обучающей выборке trainSeries, посчитаем её качество на тестовой testSeries:
+```{r}
+fitShort <- Arima(trainSeries, order=c(1,0,0), seasonal=c(2,0,0))
+fc <- forecast(fitShort, h=D)
+accuracy(fc,testSeries)
+plot(forecast(fitShort, h=D), ylab=xname, xlab="Year")
+lines(tSeries, col="black")
+```
+
+Остатки:
+```{r}
+tsdisplay(residuals(fit))
+```
+
+Критерий Льюнга-Бокса для них:
+
+```{r}
+p <- rep(0, 1, frequency(tSeries)*3)
+for (i in 1:length(p)){
+  p[i] <- Box.test(residuals(fit), lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="P-value", ylim=c(0,1))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+Принимается гипотеза автокоррелированости.
+
+Q-Q plot и гистограмма для остатков:
+```{r}
+par(mfrow=c(1,2))
+qqnorm(residuals(fit))
+qqline(residuals(fit), col="red")
+hist(residuals(fit))
+```
+
+Распределение выглядит достаточно симметричным, явных отклонений от нормальности не видно. Убедимся при помощи критерия Шапиро-Уилка:
+```{r}
+shapiro.test(residuals(fit))
+```
+
+Гипотеза нормальности не отвергается, поэтому для проверки несмещённости можно использовать критерий Стьюдента:
+```{r}
+t.test(residuals(fit))
+```
+Гипотеза несмещённости не отвергается. 
+
+Гипотеза стационарности:
+```{r}
+kpss.test(residuals(fit))
+```
+не отвергается критерием KPSS. 
+
+Гипотеза гомоскедастичности:
+```{r}
+bptest(residuals(fit) ~ c(1:length(residuals(fit))))
+```
+критерием Бройша-Пагана не отвергается. 
+
+Поскольку остатки автокоррелированы, для при построении предсказательных интервалов будем использовать метод симуляции. 
+
+Итоговый прогноз:
+```{r}
+f <- forecast(fit, h=D, bootstrap=TRUE)
+print(f)
+plot(f, ylab=xname, xlab="Year")
+```
+
+### Прогноз ARIMA для преобразованного ряда ($\lambda=LambdaOpt$)
+
+Подберём и настроим модель на полных данных:
+```{r}
+fitl <- auto.arima(tSeries,lambda=LambdaOpt)
+print(fitl)
+```
+
+Настроив выбранную модель на обучающей выборке trainSeries, посчитаем её качество на тестовой testSeries:
+```{r}
+fitShortl <- Arima(trainSeries, order=c(1,0,0), seasonal=c(2,0,0), lambda=LambdaOpt)
+fcl <- forecast(fitShortl, h=D)
+accuracy(fcl,testSeries)
+plot(forecast(fitShortl, h=D), ylab=xname, xlab="Year")
+lines(tSeries, col="black")
+```
+
+Остатки:
+```{r}
+tsdisplay(residuals(fitl))
+```
+
+Критерий Льюнга-Бокса для них:
+
+```{r}
+p <- rep(0, 1, frequency(tSeries)*3)
+for (i in 1:length(p)){
+  p[i] <- Box.test(residuals(fitl), lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="P-value", ylim=c(0,1))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+Принимаем гипотезу об автокоррелированости остатков.
+
+Q-Q plot и гистограмма для остатков:
+```{r}
+par(mfrow=c(1,2))
+qqnorm(residuals(fitl))
+qqline(residuals(fitl), col="red")
+hist(residuals(fitl))
+```
+
+Нормальность согласно критерия Шапиро-Уилкса не отвергается:
+```{r}
+shapiro.test(residuals(fitl))
+```
+
+поэтому для проверки несмещённости используем критерий Стьюдента:
+```{r}
+t.test(residuals(fitl))
+```
+Гипотеза несмещённости не отвергается. 
+
+Гипотеза стационарности:
+```{r}
+kpss.test(residuals(fitl))
+```
+не отвергается критерием KPSS. 
+
+Гипотеза гомоскедастичности:
+```{r}
+bptest(residuals(fitl) ~ c(1:length(residuals(fitl))))
+```
+критерием Бройша-Пагана не отвергается. 
+
+Однако остатки автокоррелированы, следовательно, при построении предсказательных интервалов предпочтительно пользоваться методом симуляции. 
+
+Итоговый прогноз:
+```{r}
+fl <- forecast(fitl, h=D,  bootstrap=TRUE)
+print(fl)
+plot(fl, ylab=xname, xlab="Year")
+```
+
+Проведём формальное сравнение качества двух прогнозов:
+```{r}
+res  <- fit$residuals
+resl <- tSeries - InvBoxCox(BoxCox(tSeries, lambda=LambdaOpt) - fitl$residuals, lambda = LambdaOpt)
+wilcox.test(abs(res) - abs(resl))
+dm.test(res, resl)
+```
+
+Оба критерия показывают, что значимого различия между методами нет.
+
+### Подбор параметров для ARIMA вручную 
+Учитывая, что остатки для ARIMA с автоматически подобранными параметрами, у нас получились автокоррелироваными, попробуем подобрать параметры вручную в окресности набора параметров, подобранных автроматически. В качестве меры используем RMSE. Также учитывая,  что значимого различия между моделями, построенных на исходных и преобразованных данных, установить не удалось, будем считать, что $\lambda$=1.
+```{r}
+check_param <- function(i,j,k,r,s,t){
+fitM <- Arima(trainSeries, order=c(i,j,k), seasonal=c(r,                                                 s,t))
+fc <- forecast(fitM, h=D)
+print(paste0("ARIMA(",i,",",j,",",k,")(",r,",",s,",",t,")"))
+accuracy(fc,testSeries)[3:4]
+}
+check_param(1,0,0,2,0,0)
+check_param(1,0,1,2,0,0)
+check_param(1,0,0,2,1,1)
+check_param(1,0,0,2,0,1)
+check_param(1,0,0,2,1,0)
+check_param(1,0,0,3,1,1)
+check_param(1,0,0,3,1,2)
+```
+С учетом того, что возможно переобучение (как на данных обучения, так и проверочных), оптимальной мне кажется модель ARIMA(1,0,0)(2,0,1) - с небольшим количеством параметров, у которой нет большой разницы в RMSE для данных обучения и проверки, и собственно RMSE небольшое относительно других значений.
+
+Посмотрим на прогноз:
+```{r}
+fitM <- Arima(trainSeries, order=c(1,0,0), seasonal=c(2,0,1))
+fc <- forecast(fitM, h=D)
+accuracy(fc,testSeries)
+plot(forecast(fitM, h=D), ylab=xname, xlab="Year")
+lines(tSeries, col="black")
+```
+
+Остатки:
+```{r}
+tsdisplay(residuals(fitM))
+```
+
+Критерий Льюнга-Бокса для них:
+
+```{r}
+p <- rep(0, 1, frequency(tSeries)*3)
+for (i in 1:length(p)){
+  p[i] <- Box.test(residuals(fitM), lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="P-value", ylim=c(0,1))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+Как видим, нам удалось уменьшить степень автокоррелированости остатков.
+
+Тот же график для 5-тикратного периода:
+```{r}
+p <- rep(0, 1, frequency(tSeries)*5)
+for (i in 1:length(p)){
+  p[i] <- Box.test(residuals(fitM), lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="P-value", ylim=c(0,1))
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+Q-Q plot и гистограмма для остатков:
+```{r}
+par(mfrow=c(1,2))
+qqnorm(residuals(fitM))
+qqline(residuals(fitM), col="red")
+hist(residuals(fitM))
+```
+
+Распределение выглядит достаточно симметричным, явных отклонений от нормальности не видно. Убедимся при помощи критерия Шапиро-Уилкса:
+```{r}
+shapiro.test(residuals(fitM))
+```
+
+Гипотеза нормальности не отвергается, поэтому для проверки несмещённости можно использовать критерий Стьюдента:
+```{r}
+t.test(residuals(fitM))
+```
+Гипотеза несмещённости не отвергается. 
+
+Гипотеза стационарности:
+```{r}
+kpss.test(residuals(fitM))
+```
+не отвергается критерием KPSS. 
+
+Гипотеза гомоскедастичности:
+```{r}
+bptest(residuals(fitM) ~ c(1:length(residuals(fitM))))
+```
+критерием Бройша-Пагана не отвергается. 
+
+Поскольку остатки все же автокоррелированы, для при построении предсказательных интервалов будем использовать метод симуляции. 
+
+Итоговый прогноз:
+```{r}
+f <- forecast(fitM, h=D, bootstrap=TRUE)
+print(f)
+plot(f, ylab=xname, xlab="Year")
+```
+
+Проведём формальное сравнение качества ARIMA(1,0,0)(2,0,0) и ARIMA(1,0,0)(2,0,1):
+```{r}
+
+res  <- fit$residuals
+resM <- fitM$residuals
+wilcox.test(abs(res) - abs(resM))
+dm.test(res, resM)
+```
+
+Оба критерия показывают, что различия между методами есть. Чтобы уточнить, какой лучше, повторим проверку гипотезы против односторонних альтернатив:
+```{r}
+dm.test(res, resM, alternative = "less")
+dm.test(res, resM, alternative = "greater")
+```
+alternative = "greater" соответствует альтернативе о том, что метод 1 хуже метода 2. Именно против этой альтернативы нулевая гипотеза отвергается, следовательно, прогноз,  построенный по модели ARIMA(1,0,0)(2,0,0), значимо хуже прогноза по ARIMA(1,0,0)(2,0,1). Таким образом, "руками" нам удалось заметно улучшить модель, подобранную компьтером, выполнив перебор по параметрам, исходя из предложенной модели как из исходной точки.
